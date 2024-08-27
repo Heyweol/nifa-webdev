@@ -20,7 +20,16 @@ export default createStore({
         mapTitle: 'Corn Prediction for US in 2021',
         mapDescription: '',
         mapFont: 'Arial',
-        mapBackgroundColor: '#FFFFFF'
+        mapBackgroundColor: '#FFFFFF',
+        countyData: {},
+        availableStates: [],
+        choroplethSettings: {
+          minValue: 0,
+          maxValue: 100,
+          colorScheme: ['#FFEDA0', '#FEB24C', '#F03B20'],
+          choroplethOpacity: 0.7,
+          basemapOpacity: 1.0,
+      },
     },
     mutations: {
       setMap(state, data) {
@@ -56,6 +65,13 @@ export default createStore({
         },
         setAveragePredData(state, data) {
             state.averagePredData = data
+        },
+        setCountyData(state, data) {
+            state.countyData = data
+            state.availableStates = Object.keys(data)
+        },
+        setChoroplethSettings(state, settings) {
+          state.choroplethSettings = settings
         },
     },
     actions: {
@@ -138,11 +154,47 @@ export default createStore({
                 console.error('Error fetching historical data:', error)
             }
         },
+        
+        async loadCountyData({ commit }) {
+            try {
+              const response = await fetch('/data/county.csv');
+              if (!response.ok) {
+                throw new Error(`HTTP error! status: ${response.status}`);
+              }
+              const csvText = await response.text();
+              
+              Papa.parse(csvText, {
+                header: true,
+                complete: (results) => {
+                  const countyData = {};
+                  results.data.forEach(row => {
+                    if (row.STATEFP && row.COUNTYFP && row.NAME) {
+                      if (!countyData[row.NAME]) {
+                        countyData[row.NAME] = [];
+                      }
+                      countyData[row.NAME].push({
+                        name: row.NAME,
+                        stateFp: row.STATEFP,
+                        countyFp: row.COUNTYFP
+                      });
+                    }
+                  });
+                  commit('setCountyData', countyData);
+                },
+                error: (error) => {
+                  console.error('Error parsing CSV:', error);
+                }
+              });
+            } catch (error) {
+              console.error('Error loading county data:', error);
+            }
+        },
         async initializeData({ dispatch }) {
-            await dispatch('loadCsvData')
-            await dispatch('fetchHistoricalData')
-            await dispatch('fetchAveragePred')
-        }
+      await dispatch('loadCsvData');
+      await dispatch('fetchHistoricalData');
+      await dispatch('fetchAveragePred');
+      await dispatch('loadCountyData');
+    }
     },
     getters: {
         getMap: (state) => state.map,

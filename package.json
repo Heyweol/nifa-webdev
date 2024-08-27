@@ -3,20 +3,26 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "homepage": "https://Heyweol.github.io/nifa-webdev",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "deploy": "gh-pages -d dist"
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist -f"
   },
   "dependencies": {
+    "@kyvg/vue3-notification": "^3.3.0",
     "@maplibre/maplibre-gl-style-spec": "^20.3.1",
+    "@primevue/themes": "^4.0.5",
     "d3": "^7.9.0",
     "d3-scale": "^4.0.2",
     "maplibre-gl": "^4.5.2",
     "papaparse": "^5.4.1",
+    "primevue": "^4.0.5",
     "tabulator-tables": "^6.2.5",
     "vue": "^3.4.29",
+    "vue-toastification": "^2.0.0-rc.5",
     "vuex": "^4.0.2"
   },
   "devDependencies": {
