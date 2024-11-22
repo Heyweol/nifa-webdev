@@ -1,37 +1,42 @@
-<!-- src/components/SettingsPanel.vue -->
 <template>
-  <div class="data-selection-panel">
-    <h2>Settings</h2>
-    <div class="data-selection-content">
+  <div class="bg-white p-6 rounded-lg shadow-md">
+    <h2 class="text-2xl font-bold text-green-600 mb-4">Data Selection</h2>
+    
+    <div class="space-y-4">
       <div>
-        <label for="crop">Crop:</label>
-        <select id="crop" v-model="localCrop">
+        <label for="crop" class="block text-sm font-medium text-gray-700">Crop:</label>
+        <select id="crop" v-model="localCrop" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring focus:ring-green-200 focus:ring-opacity-50">
           <option value="corn">Corn</option>
           <option value="soybean">Soybean</option>
         </select>
       </div>
+      
       <div>
-        <label for="year">Year:</label>
-        <select id="year" v-model="localYear">
+        <label for="year" class="block text-sm font-medium text-gray-700">Year:</label>
+        <select id="year" v-model="localYear" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring focus:ring-green-200 focus:ring-opacity-50">
           <option v-for="y in years" :key="y" :value="y">{{ y }}</option>
         </select>
       </div>
+      
       <div>
-        <label for="month">Month:</label>
-        <select id="month" v-model="localMonth">
-          <option v-for="m in months" :key="m" :value="m">{{ m }}</option>
+        <label for="month" class="block text-sm font-medium text-gray-700">Prediction Date:</label>
+        <select id="month" v-model="localMonth" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring focus:ring-green-200 focus:ring-opacity-50">
+          <option v-for="(date, index) in monthOptions" :key="index" :value="index">{{ date }}</option>
         </select>
       </div>
+      
       <div>
-        <label for="property">Property:</label>
-        <select id="property" v-model="localProperty">
+        <label for="property" class="block text-sm font-medium text-gray-700">Property:</label>
+        <select id="property" v-model="localProperty" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:ring focus:ring-green-200 focus:ring-opacity-50">
           <option value="pred">Prediction</option>
           <option value="yield">Yield</option>
           <option value="error">Error</option>
+          <option value="uncertainty">Uncertainty</option>
         </select>
       </div>
     </div>
-    <button @click="applyDataSelection" class="apply-button">Apply</button>
+    
+    <button @click="applyDataSelection" class="mt-6 w-full bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 transition duration-300">Apply</button>
   </div>
 </template>
 
@@ -49,6 +54,19 @@ export default {
     const localMonth = ref(store.state.currentMonth)
     const localProperty = ref(store.state.currentProperty)
 
+    const monthOptions = {
+      "0": "05/13",
+      "1": "05/29",
+      "2": "06/14",
+      "3": "06/30",
+      "4": "07/16",
+      "5": "08/01",
+      "6": "08/17",
+      "7": "09/02",
+      "8": "09/18",
+      "9": "10/04"
+    }
+
     const years = computed(() => {
       return Array.from({ length: 12 }, (_, i) => (2010 + i).toString())
     })
@@ -58,29 +76,39 @@ export default {
     })
 
     function applyDataSelection() {
-  store.commit('setCrop', localCrop.value)
-  store.commit('setYear', localYear.value)
-  store.commit('setMonth', localMonth.value)
-  store.commit('setProperty', localProperty.value)
-  store.dispatch('loadCsvData').then(() => {
-    // Recalculate min and max values
-    const csvData = store.state.csvData
-    const currentProperty = store.state.currentProperty
-    const values = csvData.map(row => parseFloat(row[currentProperty])).filter(v => !isNaN(v))
-    const minValue = Math.min(...values)
-    const maxValue = Math.max(...values)
+      store.commit('setCrop', localCrop.value)
+      store.commit('setYear', localYear.value)
+      store.commit('setMonth', localMonth.value)
+      store.commit('setProperty', localProperty.value)
+      
+      store.dispatch('loadCsvData').then(() => {
+        // Get the current data
+        const currentYear = parseInt(store.state.currentYear)
+        const currentProperty = store.state.currentProperty
+        const allPredictions = store.state.allPredictions
 
-    // Update settings in the store
-    store.commit('setChoroplethSettings', {
-      ...store.state.choroplethSettings,
-      minValue,
-      maxValue
-    })
+        // Filter data for the current year and property
+        const values = allPredictions
+          .filter(row => row.year === currentYear)
+          .map(row => parseFloat(row[currentProperty]))
+          .filter(v => !isNaN(v) && v !== null && v !== undefined)
 
-    // Emit event after data selection is applied
-    emit('apply-data-selection')
-  })
-}
+        if (values.length > 0) {
+          const minValue = Math.min(...values)
+          const maxValue = Math.max(...values)
+
+          // Update choropleth settings with new min/max values
+          store.commit('setChoroplethSettings', {
+            ...store.state.choroplethSettings,
+            minValue,
+            maxValue
+          })
+        }
+
+        // Emit event after data selection is applied
+        emit('apply-data-selection')
+      })
+    }
 
     return {
       localCrop,
@@ -90,57 +118,8 @@ export default {
       years,
       months,
       applyDataSelection,
+      monthOptions
     }
   },
 }
 </script>
-
-<style scoped>
-.data-selection-panel {
-  padding: var(--space-large);
-  background-color: var(--color-background-mute);
-  height: 100%;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-}
-
-.data-selection-content {
-  flex-grow: 1;
-  overflow-y: auto;
-}
-
-.data-selection-content div {
-  margin-bottom: var(--space-medium);
-}
-
-label {
-  display: block;
-  margin-bottom: var(--space-small);
-  color: var(--color-text);
-}
-
-select {
-  width: 100%;
-  padding: var(--space-small);
-  border-radius: var(--border-radius);
-  border: 1px solid var(--color-border);
-  background-color: var(--color-background);
-  color: var(--color-text);
-}
-
-.apply-button {
-  margin-top: var(--space-large);
-  padding: var(--space-medium);
-  background-color: var(--color-primary);
-  color: var(--color-text-button);
-  border: none;
-  border-radius: var(--border-radius);
-  cursor: pointer;
-  font-size: var(--font-size-medium);
-}
-
-.apply-button:hover {
-  background-color: var(--color-primary-dark);
-}
-</style>

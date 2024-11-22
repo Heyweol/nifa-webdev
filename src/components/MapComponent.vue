@@ -1,7 +1,7 @@
 <!-- MapComponent.vue -->
 <template>
   <div id="map-container">
-
+    <YearSlider />
     <ToolbarComponent
         @zoom-in="zoomIn"
         @zoom-out="zoomOut"
@@ -9,6 +9,9 @@
         @toggle-sidebar="toggleSidebar"
         @update-settings="updateSettings"
         @toggle-legend="toggleLegend"
+        @start-draw-line="startDrawLine"
+        @start-draw-polygon="startDrawPolygon"
+        @delete-drawing="deleteDrawing"
     />
     <transition name="sidebar">
       <div v-if="isSidebarOpen" class="sidebar" :style="{ width: sidebarWidth + 'px' }">
@@ -17,7 +20,6 @@
         <DataAnalysisPanel v-if="activeSidebar === 'analysis'" />
         <MappingPanel v-if="activeSidebar === 'mapping'" />
         <ModelPanel v-if="activeSidebar === 'run'" />
-        <!-- Add other sidebar components as needed -->
       </div>
     </transition>
     <div id="map" ref="mapContainer"></div>
@@ -39,9 +41,11 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import {Icon} from '@iconify/vue'
 import { scaleLinear } from 'd3-scale'
 import { interpolateRgb } from 'd3-interpolate'
-
-import stateBoundaries from '@/../data/gz_2010_us_040_00_20m.json'
-import countyBoundaries from '@/../data/gz_2010_us_050_00_20m.json'
+import MapboxDraw from "@mapbox/mapbox-gl-draw";
+import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
+import * as turf from '@turf/turf'
+import stateBoundaries from '@/assets/gz_2010_us_040_00_20m.json'
+import countyBoundaries from '@/assets/gz_2010_us_050_00_20m.json'
 
 import DataSelectionPanel from "@/components/DataSelectionPanel.vue";
 import ToolbarComponent from "@/components/ToolbarComponent.vue";
@@ -49,7 +53,7 @@ import DataAnalysisPanel from "@/components/DataAnalysisPanel.vue";
 import MappingPanel from "@/components/MappingPanel.vue";
 import ModelPanel from "@/components/ModelPanel.vue";
 import LegendComponent from "@/components/LegendComponent.vue";
-
+import YearSlider from "@/components/YearSlider.vue";
 
 export default {
   name: 'MapComponent',
@@ -60,12 +64,16 @@ export default {
     DataAnalysisPanel,
     MappingPanel,
     ModelPanel,
-    LegendComponent
+    LegendComponent,
+    YearSlider
   },
   setup() {
     const store = useStore()
     const mapContainer = ref(null)
     const map = ref(null)
+    const draw = ref(null)
+    const drawnPolygons = ref([])
+    const allPredictions = computed(() => store.state.allPredictions)
     const activeSidebar = ref(null)
     const scaleControl = ref(null)
     const currentUnit = ref('metric')
@@ -78,7 +86,9 @@ export default {
     const choroplethVisible = ref(true)
     const tooltip = ref(null)
     const showLegend = ref(true)
+    const markers = ref([])
     const choroplethSettings = computed(() => store.state.choroplethSettings)
+    const currentBasemapUrl = computed(() => store.getters.currentBasemapUrl)
 
     const toggleLegend = () => {
       showLegend.value = !showLegend.value
@@ -97,6 +107,78 @@ export default {
       }
     })
 
+    function initializeDrawControl() {
+      draw.value = new MapboxDraw({
+        displayControlsDefault: false,
+        controls: {
+          line_string: true,
+          polygon: true,
+          trash: true
+        },
+      });
+      console.log("Draw control initialized:", draw.value);
+      map.value.addControl(draw.value);
+
+      map.value.on('draw.create', (e) => {
+        drawnPolygons.value = draw.value.getAll().features;
+        store.dispatch('saveDrawnPolygons', drawnPolygons.value);
+      });
+
+      map.value.on('draw.delete', (e) => {
+        drawnPolygons.value = draw.value.getAll().features;
+        store.dispatch('saveDrawnPolygons', drawnPolygons.value);
+      });
+
+      // Add this new event listener
+      map.value.on('draw.update', (e) => {
+        drawnPolygons.value = draw.value.getAll().features;
+        store.dispatch('saveDrawnPolygons', drawnPolygons.value);
+      });
+
+
+
+
+
+    }
+
+
+    const addMarker = (marker) => {
+    const el = document.createElement('div');
+    el.className = 'marker';
+    el.style.width = '30px';
+    el.style.height = '30px';
+    el.style.backgroundSize = '100%';
+    el.style.backgroundImage = 'url(marker-icon.png)'; // Use your marker icon
+
+    const popup = new maplibregl.Popup({ offset: 25 }).setText(`${marker.name}: ${marker.value}`);
+
+    const markerInstance = new maplibregl.Marker(el)
+      .setLngLat([marker.lon, marker.lat])
+      .setPopup(popup)
+      .addTo(map.value);
+
+    // Automatically show the popup
+    markerInstance.togglePopup();
+
+    markers.value.push(markerInstance);
+  };
+
+    const removeMarkers = () => {
+      if (markers.value) {
+        markers.value.forEach(marker => marker.remove());
+        markers.value = [];
+      }
+    };
+
+    watch(
+      () => store.state.markers,
+      (newMarkers) => {
+        removeMarkers();
+        newMarkers.forEach(addMarker);
+      },
+      { deep: true }
+    );
+
 
     const updateChoropleth = (newSettings = null) => {
       const csvData = store.state.csvData
@@ -107,72 +189,96 @@ export default {
       }
 
       const dataById = {}
-      csvData.forEach(row => {
-        if (row[currentProperty] !== null && row[currentProperty] !== undefined) {
-          dataById[row.FIPS] = parseFloat(row[currentProperty])
+      const currentYear = parseInt(store.state.currentYear)
+      
+      // Collect data for the current year
+      allPredictions.value.forEach(row => {
+        if (row.year === currentYear) {
+          let val;
+          if (currentProperty === 'uncertainty') {
+            val = parseFloat(row.uncertainty)
+          } else {
+            val = parseFloat(row[currentProperty])
+          }
+          if (!isNaN(val)) dataById[row.FIPS] = val
         }
       })
-
-      const updatedFeatures = countiesWithFIPS.value.features.map(feature => ({
-        ...feature,
-        properties: {
-          ...feature.properties,
-          value: dataById[feature.properties.FIPS] !== undefined ? dataById[feature.properties.FIPS] : null
-        }
-      }))
 
       // Get min and max values for color scaling
       const values = Object.values(dataById).filter(v => !isNaN(v))
       let minValue = Math.min(...values)
       let maxValue = Math.max(...values)
 
-      // Use new settings if provided
-      if (newSettings) {
-        minValue = newSettings.minValue !== undefined ? newSettings.minValue : minValue
-        maxValue = newSettings.maxValue !== undefined ? newSettings.maxValue : maxValue
-        
-        if (newSettings.colorScheme) {
-          colorScale.value = scaleLinear()
-            .domain([minValue, (minValue + maxValue) / 2, maxValue])
-            .range(newSettings.colorScheme)
-            .interpolate(interpolateRgb)
-        }
-        
-        if (newSettings.choroplethOpacity !== undefined) {
-          map.value.setPaintProperty('counties-layer', 'fill-opacity', [
-            'case',
-            ['boolean', ['feature-state', 'hover'], false],
-            0.8,
-            newSettings.choroplethOpacity
-          ])
+      // Update how we handle different properties
+      if (currentProperty === 'error') {
+        const absMax = Math.max(Math.abs(minValue), Math.abs(maxValue))
+        minValue = -absMax
+        maxValue = absMax
+      } else if (currentProperty === 'uncertainty') {
+        minValue = 0  // Uncertainty should start at 0
+        maxValue = Math.max(...values)
+      }
+
+      // Get the appropriate color scheme
+      const colors = choroplethSettings.value.colorSchemes[currentProperty] || choroplethSettings.value.colorSchemes.pred
+
+      // Create color scale based on property type
+      if (currentProperty === 'error') {
+        const midpoint = 0
+        colorScale.value = (value) => {
+          if (value === null || value === undefined || isNaN(value)) {
+            return 'rgba(0, 0, 0, 0)'
+          }
+          if (value <= midpoint) {
+            return scaleLinear()
+              .domain([minValue, midpoint])
+              .range([colors[0], colors[1]])
+              .interpolate(interpolateRgb)(value)
+          } else {
+            return scaleLinear()
+              .domain([midpoint, maxValue])
+              .range([colors[1], colors[2]])
+              .interpolate(interpolateRgb)(value)
+          }
         }
       } else {
-        // Use existing color scale if no new settings
+        // Use this scale for both 'pred', 'yield', and 'uncertainty'
         colorScale.value = scaleLinear()
-          .domain([minValue, (minValue + maxValue) / 2, maxValue])
-          .range(store.state.choroplethSettings.colorScheme)
+          .domain([minValue, maxValue])
+          .range(colors)
           .interpolate(interpolateRgb)
       }
 
-      // Update colors for all features
-      updatedFeatures.forEach(feature => {
-        feature.properties.color = getColor(feature.properties.value)
+      // Update store with new min/max values
+      store.commit('setChoroplethSettings', {
+        ...choroplethSettings.value,
+        minValue,
+        maxValue
       })
 
+      // Update features with colors
+      const updatedFeatures = countiesWithFIPS.value.features.map(feature => ({
+        ...feature,
+        properties: {
+          ...feature.properties,
+          value: dataById[feature.properties.FIPS],
+          color: getColor(dataById[feature.properties.FIPS])
+        }
+      }))
+
+      // Update the source data
       map.value.getSource('counties').setData({
         type: 'FeatureCollection',
         features: updatedFeatures
       })
 
-      // Update the fill color based on the new values
+      // Update the layer paint properties
       map.value.setPaintProperty('counties-layer', 'fill-color', [
         'case',
         ['boolean', ['feature-state', 'hover'], false],
-        '#666666', // Hover color
-        ['get', 'color'] // Use the pre-calculated color
+        '#666666',
+        ['get', 'color']
       ])
-
-      console.log("Updated choropleth with data range:", minValue, "-", maxValue);
     }
 
     const getColor = (value) => {
@@ -196,6 +302,13 @@ export default {
       { deep: true }
     )
 
+    watch(currentBasemapUrl, (newUrl) => {
+      if (map.value) {
+        console.log("Updating basemap to:", newUrl)
+        map.value.getSource('osm').setTiles([newUrl])
+      }
+    })
+
     onMounted(() => {
       initializeMap()
 
@@ -208,6 +321,14 @@ export default {
 
       window.addEventListener('mousemove', resizeSidebar)
       window.addEventListener('mouseup', stopResizeSidebar)
+
+      // Initial choropleth update after map loads
+      map.value.on('load', () => {
+        // ... existing load event code ...
+        
+        // Trigger initial choropleth update
+        updateChoropleth()
+      })
     })
 
 
@@ -242,13 +363,12 @@ export default {
 
       map.value.on('load', () => {
         addCustomScaleControl()
-        // addDraggableControl(maplibregl.NavigationControl, {showCompass:false}, 'top-right')
-
+        
         // Load county boundaries
         map.value.addSource('counties', {
           type: 'geojson',
           data: countiesWithFIPS.value,
-          generateId: true // This generates a unique id for each feature
+          generateId: true
         })
 
         map.value.addLayer({
@@ -256,19 +376,7 @@ export default {
           type: 'fill',
           source: 'counties',
           paint: {
-            'fill-color': [
-              'case',
-              ['!=', ['get', 'value'], null],
-              [
-                'interpolate',
-                ['linear'],
-                ['get', 'value'],
-                0, '#FFEDA0',
-                100, '#FEB24C',
-                200, '#F03B20'
-              ],
-              'rgba(0, 0, 0, 0)' // Transparent for counties with no data
-            ],
+            'fill-color': 'rgba(0, 0, 0, 0)', // Start with transparent fill
             'fill-opacity': 0.7,
             'fill-outline-color': '#000000'
           }
@@ -359,10 +467,29 @@ export default {
         })
 
         store.commit('setMap', map.value)
-
-        updateChoropleth()
-
+        
+        // Remove this line as we don't want default choropleth
+        // updateChoropleth()
+        
+        initializeDrawControl()
       })
+
+    }
+
+    function startDrawLine() {
+      draw.value.changeMode('draw_line_string');
+    }
+
+    function startDrawPolygon() {
+      draw.value.changeMode('draw_polygon');
+    }
+
+    function deleteDrawing() {
+      draw.value.trash();
+    }
+
+    function stopDrawing() {
+    draw.value.changeMode('simple_select');
     }
 
     function showTooltip(lngLat, content) {
@@ -552,9 +679,8 @@ export default {
                   'interpolate',
                   ['linear'],
                   ['get', 'value'],
-                  0, '#FFEDA0',
-                  100, '#FEB24C',
-                  200, '#F03B20'
+                  55, '#FFEDA0',
+                  215, '#04AA6D'
                 ],
                 'rgba(0, 0, 0, 0)' // Transparent for counties with no data
               ],
@@ -609,6 +735,12 @@ export default {
         }
     }
 
+    function stopDrawing() {
+      if (draw.value) {
+        draw.value.changeMode('simple_select')
+      }
+    }
+
     onBeforeUnmount(() => {
       if (map.value) {
         if (scaleControl.value) {
@@ -626,8 +758,10 @@ export default {
 
     return {
       mapContainer,
+      draw,
       zoomIn,
       zoomOut,
+
       resetViewToCONUS,
       currentUnit,
       toggleSidebar,
@@ -641,7 +775,11 @@ export default {
       tooltip,
       showLegend,
       toggleLegend,
-      choroplethSettings
+      choroplethSettings,
+      startDrawLine,
+      startDrawPolygon,
+      deleteDrawing,
+      stopDrawing,
     }
   }
 }
@@ -651,9 +789,9 @@ export default {
 @import 'maplibre-gl/dist/maplibre-gl.css';
 
 #map-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
+  position: relative;
+  height: 100vh;
+  width: 100%;
 }
 
 .content-wrapper {
@@ -664,12 +802,13 @@ export default {
 
 .sidebar {
   position: absolute;
-  top: 86px;
-  width: 300px;
-  height: calc(100% - 86px);
+  top: 36px;
+  left: 0;
+  height: calc(100vh - 36px);
   background-color: var(--color-background);
   box-shadow: var(--shadow-light);
-  z-index: var(--z-index-sidebar);
+  z-index: 10;
+  overflow-y: auto;
 }
 
 .resize-handle {
@@ -693,8 +832,12 @@ export default {
 }
 
 #map {
-  flex-grow: 1;
-  width: 100%;
+  position: absolute;
+  top: 36px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
 }
 
 .map-controls {
@@ -755,7 +898,7 @@ export default {
   height: 20px;
 }
 
-/* .map-controls button {
+.map-controls button {
   display: flex;
   justify-content: center;
   align-items: center;
@@ -776,7 +919,7 @@ export default {
 
 
 /* Add these styles for the zoom control */
-/* .maplibregl-ctrl-group {
+.maplibregl-ctrl-group {
   border-radius: 4px;
   overflow: hidden;
 } */
@@ -818,7 +961,7 @@ export default {
 }
 
 .maplibregl-ctrl {
-  z-index: var(--z-index-maplibre-controls);
+  z-index: 15;
 }
 
 .maplibregl-ctrl-top-right {
@@ -848,4 +991,30 @@ export default {
   line-height: 1.4;
 }
 
+.mapboxgl-ctrl-top-left {
+  z-index: 1000;
+}
+
+.mapboxgl-ctrl-group {
+  pointer-events: auto;
+}
+
+.mapboxgl-ctrl-group button {
+  background-color: var(--color-button-bg);
+}
+
+.mapboxgl-ctrl-group button:hover {
+  background-color: var(--color-button-hover);
+}
+
+/* Style for active draw buttons */
+.mapboxgl-ctrl-group button.active {
+  background-color: var(--color-button-active);
+}
+
 </style>
+
+
+
+
+

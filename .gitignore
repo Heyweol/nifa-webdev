@@ -29,6 +29,6 @@ coverage
 *.sw?
 
 *.tsbuildinfo
+.cursorrules
+.cursorignore
 
-data
-csv

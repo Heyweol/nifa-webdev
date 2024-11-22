@@ -2,6 +2,7 @@
 import { createStore } from 'vuex'
 import Papa from 'papaparse'
 import * as d3 from 'd3'
+import { getBasemapUrl } from '@/utils/basemaps'
 
 export default createStore({
     state: {
@@ -13,6 +14,7 @@ export default createStore({
         mapData: null,
         selectedLocation: null,
         csvData: null,
+        allPredictions: null,
         hoveredCounty: null,
         hoveredCountyId: null,
         historicalData: [],
@@ -24,12 +26,25 @@ export default createStore({
         countyData: {},
         availableStates: [],
         choroplethSettings: {
-          minValue: 0,
-          maxValue: 100,
-          colorScheme: ['#FFEDA0', '#FEB24C', '#F03B20'],
+          minValue: 55,
+          maxValue: 215,
+          colorSchemes: {
+            pred: ['#ebf8b3', '#074359'],     // Sequential blue-green
+            yield: ['#ebf8b3', '#074359'],    // Sequential blue-green
+            error: ['#3B4992', '#FFFFFF', '#EE7733'],      // Divergent blue-orange
+            uncertainty: ['#ffffff', '#916C07']  // Sequential brown
+          },
+          colorScheme: ['#ebf8b3', '#074359'], // Default scheme
           choroplethOpacity: 0.7,
           basemapOpacity: 1.0,
+          selectedBasemap: 'osm',
+
       },
+      markers: [],
+      countyInfo: {},
+      modelQueue: [],
+      drawnPolygons: [], // Add this line to store drawn polygons
+      yearSliderVisible: true,
     },
     mutations: {
       setMap(state, data) {
@@ -37,6 +52,12 @@ export default createStore({
       },
         setCrop(state, crop) {
             state.currentCrop = crop
+            if (crop === 'soybean') {
+                state.currentYear = '2024'
+                if (state.currentProperty === 'error') {
+                    state.currentProperty = 'pred'
+                }
+            }
         },
         setYear(state, year) {
             state.currentYear = year
@@ -56,6 +77,9 @@ export default createStore({
         setCsvData(state, data) {
             state.csvData = data
           },
+          setAllPredictions(state, data) {
+            state.allPredictions = data
+          },
           setHoveredCounty(state, county) {
             state.hoveredCounty = county
             state.hoveredCountyId = county ? county.id : null
@@ -73,12 +97,65 @@ export default createStore({
         setChoroplethSettings(state, settings) {
           state.choroplethSettings = settings
         },
+        setSelectedBasemap(state, basemapId) {
+          state.selectedBasemap = basemapId
+        },
+        addMarker(state, marker) {
+          state.markers.push(marker)
+        },
+        removeMarkers(state) {
+          state.markers = [];
+        },
+        setCountyInfo(state, data) {
+          state.countyInfo = data;
+        },
+        setModelQueue(state, queue) {
+          state.modelQueue = queue;
+          localStorage.setItem('modelQueue', JSON.stringify(queue)); // Save to localStorage
+        },
+        addModelQueueJob(state, job) {
+          state.modelQueue.push(job);
+          localStorage.setItem('modelQueue', JSON.stringify(state.modelQueue)); // Save to localStorage
+        },
+        updateModelQueueJob(state, updatedJob) {
+          const index = state.modelQueue.findIndex(job => job.id === updatedJob.id);
+          if (index !== -1) {
+            state.modelQueue.splice(index, 1, updatedJob);
+            localStorage.setItem('modelQueue', JSON.stringify(state.modelQueue)); // Save to localStorage
+          }
+        },
+        clearModelQueue(state) {
+          state.modelQueue = [];
+          state.markers = [];
+          localStorage.removeItem('modelQueue'); // Clear from localStorage
+        },
+        setDrawnPolygons(state, polygons) {
+          state.drawnPolygons = polygons; // Mutation to set drawn polygons
+        },
+        clearDrawnPolygons(state) {
+          state.drawnPolygons = []; // Mutation to clear drawn polygons
+        },
+        setCurrentYear(state, year) {
+          state.currentYear = year;
+        },
+        toggleYearSlider(state) {
+          state.yearSliderVisible = !state.yearSliderVisible
+        },
+        setMapTitle(state, title) {
+          state.mapTitle = title;
+        },
+        setMapDescription(state, description) {
+          state.mapDescription = description;
+        },
+        setMapFont(state, font) {
+          state.mapFont = font;
+        },
     },
     actions: {
         async fetchMapData({ commit, state }) {
             const { currentCrop, currentYear, currentMonth } = state
             try {
-                const response = await fetch(`/data/${currentCrop}/${currentYear}/${currentMonth}.json`)
+                const response = await fetch(`data/${currentCrop}/${currentYear}/${currentMonth}.json`)
                 if (!response.ok) {
                     throw new Error(`HTTP error! status: ${response.status}`)
                 }
@@ -102,7 +179,6 @@ export default createStore({
               Papa.parse(csvText, {
                 header: true,
                 complete: (results) => {
-                  // Filter out empty rows and convert numeric fields to 2 decimal places
                   const cleanedData = results.data
                     .filter(row => Object.values(row).some(value => value.trim() !== ''))
                     .map(row => ({
@@ -121,9 +197,38 @@ export default createStore({
               console.error('Error loading CSV data:', error)
             }
         },
+        async fetchAllPredictions({ commit, state }) {
+          try {
+            const filePath = state.currentCrop === 'corn' 
+              ? 'data/prediction23.csv'
+              : 'data/soybean_2024_284.csv'
+            
+            const response = await fetch(filePath)
+            const csvText = await response.text()
+            
+            Papa.parse(csvText, {
+              header: true,
+              complete: (results) => {
+                const allPredictions = results.data
+                  .filter(row => row.FIPS) // Filter out empty rows
+                  .map(row => ({
+                    FIPS: row.FIPS,
+                    year: state.currentCrop === 'corn' ? parseInt(row.year) : 2024,
+                    pred: parseFloat(row.pred),
+                    yield: parseFloat(row.yield),
+                    uncertainty: parseFloat(row.uncertainty),
+                    error: state.currentCrop === 'corn' ? (parseFloat(row.pred) - parseFloat(row.yield)) : null
+                  }))
+                commit('setAllPredictions', allPredictions)
+              }
+            })
+          } catch (error) {
+            console.error('Error fetching predictions:', error)
+          }
+        },
         async fetchHistoricalData({ commit }) {
           try {
-              const response = await fetch('/data/corn_yield_US.csv')
+              const response = await fetch('data/corn_yield_US.csv')
               if (!response.ok) {
                   throw new Error(`HTTP error! status: ${response.status}`)
               }
@@ -140,7 +245,7 @@ export default createStore({
         },
         async fetchAveragePred({ commit }) {
             try {
-                const response = await fetch('/data/average_pred.csv')
+                const response = await fetch('data/average_pred.csv')
                 const csvText = await response.text()
                 const parsedData = d3.csvParse(csvText, d => ({
                     FIPS: d.FIPS,
@@ -157,7 +262,7 @@ export default createStore({
         
         async loadCountyData({ commit }) {
             try {
-              const response = await fetch('/data/county.csv');
+              const response = await fetch('data/county.csv');
               if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
               }
@@ -189,11 +294,65 @@ export default createStore({
               console.error('Error loading county data:', error);
             }
         },
+
+        async loadCountyInfo({ commit }) {
+          try {
+            const response = await fetch('data/county_info.csv');
+            if (!response.ok) {
+              throw new Error(`HTTP error! status: ${response.status}`);
+            }
+            const csvText = await response.text();
+            const parsedData = Papa.parse(csvText, {
+              header: true,
+              dynamicTyping: true,
+              complete: (results) => {
+                const countyInfo = {};
+                results.data.forEach(row => {
+                  const fips = row.FIPS.toString().padStart(5, '0');
+                  countyInfo[fips] = { lat: row.lat, lon: row.lon };
+                });
+                commit('setCountyInfo', countyInfo);
+              },
+              error: (error) => {
+                console.error('Error parsing CSV:', error);
+              }
+            });
+          } catch (error) {
+            console.error('Error loading county info:', error);
+          }
+        },
+        loadModelQueue({ commit }) {
+          const savedQueue = localStorage.getItem('modelQueue');
+          if (savedQueue) {
+            commit('setModelQueue', JSON.parse(savedQueue));
+          }
+        },
+        saveModelQueue({ state }) {
+          localStorage.setItem('modelQueue', JSON.stringify(state.modelQueue));
+        },
+        clearModelQueue({ commit }) {
+          commit('clearModelQueue');
+          localStorage.removeItem('modelQueue');
+        },
+        saveDrawnPolygons({ commit }, polygons) {
+          commit('setDrawnPolygons', polygons); // Action to save drawn polygons
+        },
+        clearDrawnPolygons({ commit }) {
+          commit('clearDrawnPolygons'); // Action to clear drawn polygons
+        },
+
         async initializeData({ dispatch }) {
       await dispatch('loadCsvData');
       await dispatch('fetchHistoricalData');
       await dispatch('fetchAveragePred');
       await dispatch('loadCountyData');
+      await dispatch('loadCountyInfo');
+      await dispatch('fetchAllPredictions');
+    },
+    async initializeMapState({ dispatch, commit, state }) {
+      await dispatch('initializeData')
+      commit('setProperty', 'pred')
+      commit('setYear', state.currentCrop === 'soybean' ? 2024 : state.currentYear)
     }
     },
     getters: {
@@ -204,6 +363,18 @@ export default createStore({
         hoveredCountyName: state => state.hoveredCounty ? state.hoveredCounty.name : null,
         hoveredCountyValue: state => state.hoveredCounty ? state.hoveredCounty.value : null,
         getHistoryData: state => state.historicalData ,
+        getAllPredictions: state => state.allPredictions,
         getAveragePredData: state => state.averagePredData ,
+        currentBasemapUrl: (state) => {
+          return getBasemapUrl(state.selectedBasemap)
+        },
+        getMapImage: (state) => {
+          if (state.map) {
+            const mapImage = state.map.getCanvas().toDataURL()
+            return mapImage
+          }
+          return null
+        },
+        getDrawnPolygons: (state) => state.drawnPolygons, // Getter to retrieve drawn polygons
     },
 })

@@ -1,90 +1,147 @@
 <template>
-    <div ref="legendContainer" class="legend-container" :style="{ left: position.x + 'px', top: position.y + 'px' }">
-      <div class="legend-header" @mousedown="startDrag">
-        <span>Legend</span>
-        <button @click="$emit('close')" class="close-button">&times;</button>
+  <div ref="legendContainer" class="legend-container" :style="{ left: position.x + 'px', top: position.y + 'px' }">
+    <div class="legend-header" @mousedown="startDrag">
+      <span>{{ mappedPropertyTitle }}</span>
+      <button @click="$emit('close')" class="close-button">&times;</button>
+    </div>
+    <div class="legend-content">
+      <div class="color-scale">
+        <div v-for="(color, index) in interpolatedColorScale" :key="index" :style="{ backgroundColor: color }" class="color-bar"></div>
       </div>
-      <div class="legend-content">
-        <div class="color-scale">
-          <div v-for="(color, index) in interpolatedColorScale" :key="index" :style="{ backgroundColor: color }" class="color-bar"></div>
-        </div>
-        <div class="scale-labels">
-          <span>{{ minValue.toFixed(2) }}</span>
-          <span>{{ maxValue.toFixed(2) }}</span>
-        </div>
+      <div class="scale-labels">
+        <span>{{ currentMinValue.toFixed(2) }}</span>
+        <span>{{ currentMaxValue.toFixed(2) }}</span>
       </div>
     </div>
-  </template>
-  
-  <script>
-  import { ref, computed } from 'vue';
-  import { scaleLinear } from 'd3-scale';
-  import { interpolateRgb } from 'd3-interpolate';
-  
-  export default {
-    name: 'LegendComponent',
-    props: {
-      minValue: { type: Number, required: true },
-      maxValue: { type: Number, required: true },
-      colorScale: { type: Array, required: true },
-    },
-    emits: ['close'],
-    setup(props) {
-      const position = ref({ x: window.innerWidth - 250, y: window.innerHeight - 200 });
-      const isDragging = ref(false);
-      const dragOffset = ref({ x: 0, y: 0 });
-      const legendContainer = ref(null);
-  
-      const interpolatedColorScale = computed(() => {
-        const scale = scaleLinear()
-          .domain([0, props.colorScale.length - 1])
-          .range([props.minValue, props.maxValue]);
-  
-        const colorInterpolator = scaleLinear()
-          .domain(props.colorScale.map((_, i) => scale(i)))
-          .range(props.colorScale)
+  </div>
+</template>
+
+<script>
+import { ref, computed, watch } from 'vue';
+import { useStore } from 'vuex';
+import { scaleLinear } from 'd3-scale';
+import { interpolateRgb } from 'd3-interpolate';
+
+const propertyTitleMap = {
+  pred: 'Prediction',
+  yield: 'Crop Yield',
+  error: 'Error',
+  uncertainty: 'Uncertainty'
+};
+
+export default {
+  name: 'LegendComponent',
+  props: {
+    minValue: { type: Number, required: true },
+    maxValue: { type: Number, required: true },
+    colorScale: { type: Array, required: true },
+  },
+  emits: ['close'],
+  setup(props) {
+    const store = useStore();
+    const currentProperty = computed(() => store.state.currentProperty);
+    const choroplethSettings = computed(() => store.state.choroplethSettings);
+    
+    // Add validation for min/max values
+    const currentMinValue = computed(() => {
+      const min = choroplethSettings.value.minValue;
+      return isFinite(min) ? min : 0;
+    });
+
+    const currentMaxValue = computed(() => {
+      const max = choroplethSettings.value.maxValue;
+      return isFinite(max) ? max : 100;
+    });
+
+    const mappedPropertyTitle = computed(() => {
+      return propertyTitleMap[currentProperty.value] || currentProperty.value;
+    });
+
+    const position = ref({ x: window.innerWidth - 250, y: window.innerHeight - 200 });
+    const isDragging = ref(false);
+    const dragOffset = ref({ x: 0, y: 0 });
+    const legendContainer = ref(null);
+
+    // Update interpolatedColorScale to use choroplethSettings
+    const interpolatedColorScale = computed(() => {
+      const property = currentProperty.value;
+      const colorSchemes = choroplethSettings.value.colorSchemes;
+      
+      // Ensure we have a valid color scheme
+      if (!colorSchemes || !colorSchemes[property]) {
+        console.warn(`No color scheme found for property: ${property}`);
+        return Array.from({ length: 100 }, () => '#CCCCCC'); // Fallback color
+      }
+
+      const colors = colorSchemes[property];
+      
+      // Handle error property with divergent scale
+      if (property === 'error' && colors.length === 3) {
+        const midpoint = (currentMaxValue.value + currentMinValue.value) / 2;
+        
+        const negativeScale = scaleLinear()
+          .domain([currentMinValue.value, midpoint])
+          .range([colors[0], colors[1]])
           .interpolate(interpolateRgb);
-  
-        return Array.from({ length: 100 }, (_, i) => colorInterpolator(scale(i / 99)));
+          
+        const positiveScale = scaleLinear()
+          .domain([midpoint, currentMaxValue.value])
+          .range([colors[1], colors[2]])
+          .interpolate(interpolateRgb);
+          
+        return Array.from({ length: 100 }, (_, i) => {
+          const value = currentMinValue.value + (i / 99) * (currentMaxValue.value - currentMinValue.value);
+          return value <= midpoint ? negativeScale(value) : positiveScale(value);
+        });
+      }
+      
+      // For all other properties (including uncertainty), use sequential scale
+      return Array.from({ length: 100 }, (_, i) => {
+        const t = i / 99;
+        return interpolateRgb(colors[0], colors[1])(t);
       });
+    });
+
+    const startDrag = (event) => {
+      isDragging.value = true;
+      dragOffset.value = {
+        x: event.clientX - position.value.x,
+        y: event.clientY - position.value.y,
+      };
+      document.addEventListener('mousemove', drag);
+      document.addEventListener('mouseup', stopDrag);
+    };
   
-      const startDrag = (event) => {
-        isDragging.value = true;
-        dragOffset.value = {
-          x: event.clientX - position.value.x,
-          y: event.clientY - position.value.y,
+    const drag = (event) => {
+      if (isDragging.value) {
+        position.value = {
+          x: event.clientX - dragOffset.value.x,
+          y: event.clientY - dragOffset.value.y,
         };
-        document.addEventListener('mousemove', drag);
-        document.addEventListener('mouseup', stopDrag);
-      };
+      }
+    };
   
-      const drag = (event) => {
-        if (isDragging.value) {
-          position.value = {
-            x: event.clientX - dragOffset.value.x,
-            y: event.clientY - dragOffset.value.y,
-          };
-        }
-      };
+    const stopDrag = () => {
+      isDragging.value = false;
+      document.removeEventListener('mousemove', drag);
+      document.removeEventListener('mouseup', stopDrag);
+    };
   
-      const stopDrag = () => {
-        isDragging.value = false;
-        document.removeEventListener('mousemove', drag);
-        document.removeEventListener('mouseup', stopDrag);
-      };
-  
-      return {
-        position,
-        legendContainer,
-        startDrag,
-        interpolatedColorScale,
-      };
-    },
-  };
-  </script>
-  
-  <style scoped>
-  .legend-container {
+    return {
+      position,
+      legendContainer,
+      startDrag,
+      interpolatedColorScale,
+      mappedPropertyTitle,
+      currentMinValue,
+      currentMaxValue,
+    };
+  },
+};
+</script>
+
+<style scoped>
+.legend-container {
   position: absolute;
   background-color: rgba(255, 255, 255, 0.8);
   border-radius: 8px;
@@ -114,24 +171,24 @@
   line-height: 1;
 }
   
-  .legend-content {
-    padding: 12px;
-    margin-top: 6px;
-  }
+.legend-content {
+  padding: 12px;
+  margin-top: 6px;
+}
   
-  .color-scale {
-    display: flex;
-    height: 20px;
-    margin-bottom: 4px;
-  }
+.color-scale {
+  display: flex;
+  height: 20px;
+  margin-bottom: 4px;
+}
   
-  .color-bar {
-    flex-grow: 1;
-  }
+.color-bar {
+  flex-grow: 1;
+}
   
-  .scale-labels {
-    display: flex;
-    justify-content: space-between;
-    font-size: 14px;
-  }
-  </style>
+.scale-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+}
+</style>
